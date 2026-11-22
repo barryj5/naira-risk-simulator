@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Naira Risk Simulator</title>
+<style>
+  body { font-family: "Segoe UI", Arial, sans-serif; margin: 0; background: #f4f6f8; color: #1a1a1a; }
+  header { background: #0f4c5c; color: #fff; padding: 18px 24px; }
+  header h1 { margin: 0; font-size: 22px; }
+  header p { margin: 4px 0 0; font-size: 13px; opacity: 0.85; }
+  main { max-width: 920px; margin: 20px auto; padding: 0 16px; }
+  .panel { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+  .controls { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end; }
+  label { display: flex; flex-direction: column; font-size: 13px; gap: 6px; }
+  select { padding: 7px; font-size: 14px; }
+  button { background: #0f4c5c; color: #fff; border: 0; border-radius: 6px; padding: 10px 20px; font-size: 14px; cursor: pointer; }
+  button:hover { background: #0c3c49; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: #fff; border-radius: 8px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+  .card small { color: #666; font-size: 12px; }
+  .card strong { display: block; font-size: 20px; margin-top: 4px; }
+  canvas { width: 100%; height: 380px; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; margin-top: 10px; color: #444; }
+  .legend i { display: inline-block; width: 18px; height: 10px; margin-right: 6px; vertical-align: middle; }
+  #msg { color: #b00020; font-size: 14px; min-height: 20px; margin-bottom: 8px; }
+  .note { font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Naira Risk Simulator</h1>
+  <p>ARIMA forecast and simulated rate paths (NFEM closing rate, naira per US dollar)</p>
+</header>
+<main>
+  <div class="panel controls">
+    <label>Simulation method
+      <select id="method">
+        <option value="gan">GAN</option>
+        <option value="bootstrap">Bootstrap (baseline)</option>
+      </select>
+    </label>
+    <label>Days ahead: <span id="daysLabel">10</span>
+      <input type="range" id="days" min="1" max="10" value="10">
+    </label>
+    <button id="run">Run simulation</button>
+  </div>
+  <div id="msg"></div>
+  <div class="cards">
+    <div class="card"><small id="lLast">Last known rate</small><strong id="cLast">-</strong></div>
+    <div class="card"><small id="lMed">Simulated median</small><strong id="cMed">-</strong></div>
+    <div class="card"><small id="lRange">90% range</small><strong id="cRange">-</strong></div>
+    <div class="card"><small id="lArima">ARIMA forecast</small><strong id="cArima">-</strong></div>
+  </div>
+  <div class="panel">
+    <canvas id="chart"></canvas>
+    <div class="legend">
+      <span><i style="background:#0f4c5c"></i>Simulated median</span>
+      <span><i style="background:rgba(15,76,92,0.25)"></i>5th to 95th percentile band</span>
+      <span><i style="background:#e07b00"></i>ARIMA forecast (dashed = its range)</span>
+      <span>Horizontal axis: business days ahead</span>
+    </div>
+  </div>
+  <p class="note">This tool shows possible outcomes from past rate behaviour. It is not financial advice and cannot predict sudden shocks.</p>
+</main>
+<script>
+const API = "http://127.0.0.1:8000";
+const $ = id => document.getElementById(id);
+let last = null;
+
+$("days").addEventListener("input", () => { $("daysLabel").textContent = $("days").value; });
+$("run").addEventListener("click", run);
+window.addEventListener("resize", () => { if (last) draw(last.sim, last.fc); });
+
+async function getJson(url) {
+  let r;
+  try { r = await fetch(url); }
+  catch (e) { throw new Error("Cannot reach the API. Start it with: uvicorn api.main:app --reload"); }
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail; } catch (e) {}
+    throw new Error(detail || "API error " + r.status);
+  }
+  return r.json();
+}
+
+async function run() {
+  $("msg").textContent = "Running...";
+  const method = $("method").value, days = $("days").value;
+  try {
+    const sim = await getJson(API + "/simulate?method=" + method + "&days=" + days);
+    const fc = await getJson(API + "/forecast?days=" + days);
+    last = { sim: sim, fc: fc };
+    $("msg").textContent = "";
+    showCards(sim, fc);
+    draw(sim, fc);
+  } catch (e) {
+    $("msg").textContent = e.message;
+  }
+}
+
+function showCards(sim, fc) {
+  const n = sim.p50.length - 1;
+  const f = v => v.toFixed(2);
+  $("lLast").textContent = "Last known rate (" + fc.last_date + ")";
+  $("cLast").textContent = f(sim.last_rate);
+  $("lMed").textContent = "Simulated median, day " + (n + 1);
+  $("cMed").textContent = f(sim.p50[n]);
+  $("lRange").textContent = "90% range, day " + (n + 1);
+  $("cRange").textContent = f(sim.p5[n]) + " to " + f(sim.p95[n]);
+  $("lArima").textContent = "ARIMA forecast, day " + (n + 1);
+  $("cArima").textContent = f(fc.forecast[n]);
+}
+
+function draw(sim, fc) {
+  const c = $("chart"), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d");
+  g.scale(dpr, dpr);
+  g.clearRect(0, 0, w, h);
+
+  const L = sim.last_rate, add = a => [L].concat(a);
+  const p5 = add(sim.p5), p50 = add(sim.p50), p95 = add(sim.p95);
+  const fm = add(fc.forecast), fl = add(fc.lower), fu = add(fc.upper);
+  const paths = sim.sample_paths.map(add);
+  const n = p50.length - 1;
+
+  const all = p5.concat(p95, fl, fu);
+  let lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
+  const pad = (hi - lo) * 0.08 || 1;
+  lo -= pad; hi += pad;
+  const m = { l: 56, r: 14, t: 14, b: 30 };
+  const X = i => m.l + (w - m.l - m.r) * i / n;
+  const Y = v => m.t + (h - m.t - m.b) * (1 - (v - lo) / (hi - lo));
+
+  g.font = "11px Segoe UI, Arial";
+  g.fillStyle = "#666"; g.strokeStyle = "#e3e6ea"; g.lineWidth = 1;
+  g.textAlign = "right"; g.textBaseline = "middle";
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (hi - lo) * k / 4, y = Y(v);
+    g.beginPath(); g.moveTo(m.l, y); g.lineTo(w - m.r, y); g.stroke();
+    g.fillText(v.toFixed(0), m.l - 6, y);
+  }
+  g.textAlign = "center"; g.textBaseline = "top";
+  for (let i = 0; i <= n; i++) g.fillText(String(i), X(i), h - m.b + 8);
+
+  g.beginPath(); g.moveTo(X(0), Y(p95[0]));
+  for (let i = 1; i <= n; i++) g.lineTo(X(i), Y(p95[i]));
+  for (let i = n; i >= 0; i--) g.lineTo(X(i), Y(p5[i]));
+  g.closePath(); g.fillStyle = "rgba(15,76,92,0.15)"; g.fill();
+
+  const line = (arr, color, width, dash) => {
+    g.beginPath(); g.setLineDash(dash || []);
+    g.strokeStyle = color; g.lineWidth = width;
+    arr.forEach((v, i) => { if (i) g.lineTo(X(i), Y(v)); else g.moveTo(X(i), Y(v)); });
+    g.stroke(); g.setLineDash([]);
+  };
+  paths.forEach(p => line(p, "rgba(15,76,92,0.15)", 1));
+  line(p50, "#0f4c5c", 2.5);
+  line(fl, "#e07b00", 1.3, [5, 4]);
+  line(fu, "#e07b00", 1.3, [5, 4]);
+  line(fm, "#e07b00", 2.5);
+}
+
+run();
+</script>
+</body>
+</html>
