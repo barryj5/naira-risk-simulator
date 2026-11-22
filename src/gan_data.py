@@ -1,7 +1,7 @@
 import numpy as np
 from data import load_rate
 
-WINDOW = 20   # each training example is 20 business days long
+WINDOW = 10   # each training example is 10 business days long
 
 
 def make_windows(returns, window=WINDOW):

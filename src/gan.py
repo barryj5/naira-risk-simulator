@@ -7,7 +7,7 @@ from data import load_rate
 from gan_data import get_gan_data, WINDOW
 
 NOISE_DIM = 16
-STEPS = 3000
+STEPS = 10000
 BATCH = 64
 MODEL_PATH = Path("models/gan.pt")
 
@@ -66,7 +66,7 @@ def train():
         g_loss.backward()
         opt_g.step()
 
-        if step % 300 == 0:
+        if step % 1000 == 0:
             print(f"step {step}  D loss {d_loss.item():.3f}  G loss {g_loss.item():.3f}")
 
     MODEL_PATH.parent.mkdir(exist_ok=True)
@@ -82,24 +82,41 @@ def simulate(n_paths=200, days=WINDOW, model_path=MODEL_PATH):
     G.eval()
     with torch.no_grad():
         scaled = G(torch.randn(n_paths, NOISE_DIM)).numpy()
+    scaled = scaled - scaled.mean(axis=0, keepdims=True)   # remove the GAN's built-in drift
     returns = scaled[:, :days] * ckpt["std"] + ckpt["mean"]   # back to real % changes
     paths = ckpt["last_rate"] * np.cumprod(1 + returns, axis=1)   # back to naira rates
     return paths, returns
 
 
+def bootstrap_paths(n_paths=200, days=WINDOW):
+    """Baseline: build paths by reshuffling real daily changes at random."""
+    rate = load_rate()
+    returns = rate.pct_change().dropna().to_numpy()
+    rng = np.random.default_rng(0)
+    sampled = rng.choice(returns, size=(n_paths, days), replace=True)
+    return rate.iloc[-1] * np.cumprod(1 + sampled, axis=1), sampled
+
+
 if __name__ == "__main__":
     train()
     paths, gen_returns = simulate(200)
+    boot_paths, boot_returns = bootstrap_paths(200)
 
     windows, mean, std, last_rate = get_gan_data()
     real_returns = windows * std + mean
-    real_cum = np.prod(1 + real_returns, axis=1) - 1
-    gen_cum = np.prod(1 + gen_returns, axis=1) - 1
-    print("20-day change, REAL:      mean %.4f  std %.4f" % (real_cum.mean(), real_cum.std()))
-    print("20-day change, GENERATED: mean %.4f  std %.4f" % (gen_cum.mean(), gen_cum.std()))
+
+    def cum(r):
+        return np.prod(1 + r, axis=1) - 1
+
+    print(f"{WINDOW}-day change (mean %, std %):")
+    for name, r in [("REAL", real_returns), ("GAN", gen_returns), ("BOOTSTRAP", boot_returns)]:
+        print("  %-10s %6.2f  %6.2f" % (name, cum(r).mean() * 100, cum(r).std() * 100))
+    print("Per-day mean of GAN returns (%):", np.round(gen_returns.mean(axis=0) * 100, 2))
+    print("Per-day std of GAN returns (%): ", np.round(gen_returns.std(axis=0) * 100, 2))
+    print("Real daily std (%):", round(std * 100, 2))
 
     rate = load_rate()
-    plt.plot(range(-59, 1), rate.iloc[-60:].to_numpy(), color="black", label="history")
+    plt.plot(range(-29, 1), rate.iloc[-30:].to_numpy(), color="black", label="history")
     for p in paths[:50]:
         plt.plot(range(0, WINDOW + 1), np.concatenate([[last_rate], p]), alpha=0.25)
     plt.title("GAN simulated paths (50 of 200)")
